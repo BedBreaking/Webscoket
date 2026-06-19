@@ -1,6 +1,6 @@
 const http = require("http");
 const { WebSocketServer } = require("ws");
-
+const { randomUUID } = require("crypto");
 const PORT = process.env.PORT || 8080;
 
 const server = http.createServer();
@@ -12,11 +12,8 @@ const wss = new WebSocketServer({
 const rooms = {};
 
 wss.on("connection", (socket) => {
-  console.log("Player Connected");
-
   socket.on("message", (message) => {
     const data = JSON.parse(message);
-
     switch (data.type) {
       case "join":
         joinRoom(socket, data.payload);
@@ -29,63 +26,118 @@ wss.on("connection", (socket) => {
   });
 
   socket.on("close", () => {
-    console.log("Player Disconnected");
-
-    if (socket.roomId && rooms[socket.roomId]) {
-      rooms[socket.roomId] = rooms[socket.roomId].filter(
-        (player) => player !== socket,
+    const roomId = socket.roomId;
+    if (!roomId || !rooms[roomId]) return;
+    rooms[roomId] = rooms[roomId].filter((player) => player !== socket);
+    const players = getRoomPlayers(roomId);
+    rooms[roomId].forEach((player) => {
+      player.send(
+        JSON.stringify({
+          type: "room_players",
+          roomId,
+          players,
+        }),
       );
-    }
+    });
+
+    console.log(`${socket.name} disconnected`);
   });
 });
 
-function joinRoom(socket, data) {
-  console.log(data, "Data");
-  const { roomId, name } = data;
-  console.log(roomId, "Room ID");
-  console.log(name, "Player Name");
+function getRoomPlayers(roomId) {
+  return rooms[roomId].map((player) => ({
+    id: player.playerId,
+    name: player.name,
+    points: player.points,
+  }));
+}
+
+function joinRoom(socket, payload) {
+  const { roomId, name } = payload;
+  if (!roomId || !name) {
+    socket.send(
+      JSON.stringify({
+        type: "error",
+        message: "roomId and name are required",
+      }),
+    );
+    return;
+  }
+
   if (!rooms[roomId]) {
     rooms[roomId] = [];
   }
 
-  rooms[roomId].push(socket);
+  const alreadyJoined = rooms[roomId].some((player) => player === socket);
+
+  if (alreadyJoined) {
+    return;
+  }
+
   socket.roomId = roomId;
   socket.name = name;
+  socket.playerId = randomUUID();
+  socket.points = 0;
 
-  console.log(`Player joined room ${roomId}`);
+  rooms[roomId].push(socket);
+
+  const players = getRoomPlayers(roomId);
 
   socket.send(
     JSON.stringify({
       type: "joined",
       roomId,
-      name: name,
+      player: {
+        id: socket.playerId,
+        name: socket.name,
+        points: socket.points,
+      },
+      players,
     }),
   );
-  socket;
+
+  rooms[roomId].forEach((player) => {
+    player.send(
+      JSON.stringify({
+        type: "room_players",
+        roomId,
+        players,
+      }),
+    );
+  });
+
+  console.log(
+    `${name} joined room ${roomId}. Total players: ${players.length}`,
+  );
 }
 
 function sendMove(socket, data) {
-  console.log(rooms[socket.roomId], "room");
+  const roomId = socket.roomId;
 
-  const room = rooms[socket.roomId];
+  const room = rooms[roomId];
+
   if (!room) return;
 
-  room.forEach((player) => {
-    console.log(player, "player");
+  if (data.pointType === "increment") {
+    socket.points += data.points;
+  }
 
-    if (player !== socket) {
-      player.send(
-        JSON.stringify({
-          type: "move",
-          x: data.x,
-          y: data.y,
-          name: data.player,
-        }),
-      );
-    }
+  if (data.pointType === "decrement") {
+    socket.points -= data.points;
+  }
+
+  const players = getRoomPlayers(roomId);
+
+  room.forEach((player) => {
+    player.send(
+      JSON.stringify({
+        type: "room_players",
+        roomId,
+        players,
+      }),
+    );
   });
 }
-
 server.listen(PORT, () => {
   console.log(`WebSocket Server Running on ${PORT}`);
 });
